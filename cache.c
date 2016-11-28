@@ -1,81 +1,164 @@
-/*
- * cachelab.c - Cache Lab helper functions
- */
-#include <stdio.h>
+#include <getopt.h>
 #include <stdlib.h>
-#include <assert.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <ctype.h> 
+#include <math.h>
 
-trans_func_t func_list[MAX_TRANS_FUNCS];
-int func_counter = 0; 
+int hit_count = 0, miss_count = 0, eviction_count = 0; 
+int sflag = 0;
+int eflag = 0;
+int bflag = 0;
+char *t = NULL; 
+int tagBits = 0;
+int indexBits = 0;
+int globalTime = 0;
 
-/* 
- * printSummary - Summarize the cache simulation statistics. Student cache simulators
- *                must call this function in order to be properly autograded. 
- */
-void printSummary(int hits, int misses, int evictions)
-{
-    printf("hits:%d misses:%d evictions:%d\n", hits, misses, evictions);
-    FILE* output_fp = fopen(".csim_results", "w");
-    assert(output_fp);
-    printf(output_fp, "%d %d %d\n", hits, misses, evictions);
-    fclose(output_fp);
+struct Line {
+    int validBit;
+    int tag;
+    int time;
+};
+
+struct Set {
+    struct Line** lines;
+};
+
+typedef struct Cache {
+    struct Set** sets;
+} Cache;
+
+Cache* initStructs() {
+    //num sets = ln(s) num lines/set = E
+    Cache* cache = (Cache*)malloc(sizeof(Cache));
+    int numSets = 1 << sflag;
+    cache->sets = (struct Set**) malloc(sizeof(struct Set*) * numSets);
+    for(int i = 0; i < numSets; ++i) {
+          cache->sets[i] = (struct Set*)malloc(sizeof(struct Set));
+          cache->sets[i]->lines = (struct Line **) malloc(eflag * sizeof(struct Line*));
+          for(int j = 0; j < eflag; ++j) {
+                cache->sets[i]->lines[j] = (struct Line*)malloc(sizeof(struct Line));
+                cache->sets[i]->lines[j]->tag = 0;
+                cache->sets[i]->lines[j]->validBit = 0;
+                cache->sets[i]->lines[j]->time = 0;
+          }
+    } 
+    indexBits = sflag;
+    tagBits = 64 - (sflag + bflag);
+    return cache;
 }
 
-/* 
- * initMatrix - Initialize the given matrix 
- */
-void initMatrix(int M, int N, int A[N][M], int B[M][N])
-{
-    int i, j;
-    srand(time(NULL));
-    for (i = 0; i < N; i++){
-        for (j = 0; j < M; j++){
-            // A[i][j] = i+j;  /* The matrix created this way is symmetric */
-            A[i][j]=rand();
-            B[j][i]=rand();
+void runWithInput(unsigned long long int memaddrs, Cache* cache) {
+  
+   unsigned long long int tag = memaddrs >> (sflag + bflag);
+   unsigned long long int index = memaddrs << tagBits;
+   index = index >> (tagBits + bflag);
+   struct Set* checkSet = cache->sets[index];
+   globalTime++; 
+   for (int i = 0; i < eflag; ++i) {
+        struct Line* checkLine = checkSet->lines[i];
+        if(checkLine->validBit) {
+            if(checkLine->tag == tag) {
+                checkLine->time = globalTime;
+                hit_count++;
+                return;
+            }
+        } 
+   } 
+   miss_count++;
+    
+   for (int i = 0; i < eflag; ++i) {
+        struct Line* checkLine = checkSet->lines[i];
+        if (checkLine->validBit == 0) {
+            checkLine->validBit = 1;
+            checkLine->tag = tag;
+            checkLine->time = globalTime;  
+            return;      
         }
     }
+   int lowestTime = checkSet->lines[0]->time;
+   int lruIndex = 0;
+   for (int i = 1; i < eflag; ++i) {
+        if(checkSet->lines[i]->time <= lowestTime) {
+            lowestTime = checkSet->lines[i]->time;
+            lruIndex = i;
+        }      
+   }
+   
+   eviction_count++; 
+   checkSet->lines[lruIndex]->tag = tag;
+   checkSet->lines[lruIndex]->time = globalTime;
+   return;
+
 }
 
-void randMatrix(int M, int N, int A[N][M]) {
-    int i, j;
-    srand(time(NULL));
-    for (i = 0; i < N; i++){
-        for (j = 0; j < M; j++){
-            // A[i][j] = i+j;  /* The matrix created this way is symmetric */
-            A[i][j]=rand();
-        }
+void readInInput(Cache* cache) {
+    FILE *file;
+    file = fopen(t, "r"); 
+
+    if(file == NULL) {
+        printf("%s\n", "Error opening file");
+        exit(1);
     }
-}
+    
+    long long int memaddrs; 
+    char type;    
+    int space;
+    while(fscanf(file, " %c %llx,%d", &type, &memaddrs, &space) != EOF) { 
+            if (type != 'I') {
+            if (type == 'M') {
+                  runWithInput(memaddrs, cache);
+            }
 
-/* 
- * correctTrans - baseline transpose function used to evaluate correctness 
- */
-void correctTrans(int M, int N, int A[N][M], int B[M][N])
-{
-    int i, j, tmp;
-    for (i = 0; i < N; i++){
-        for (j = 0; j < M; j++){
-            tmp = A[i][j];
-            B[j][i] = tmp;
+            runWithInput(memaddrs, cache);
         }
     }    
 }
 
 
-
-/* 
- * registerTransFunction - Add the given trans function into your list
- *     of functions to be tested
- */
-void registerTransFunction(void (*trans)(int M, int N, int[N][M], int[M][N]), 
-                           char* desc)
+int main(int argc, char *argv[])
 {
-    func_list[func_counter].func_ptr = trans;
-    func_list[func_counter].description = desc;
-    func_list[func_counter].correct = 0;
-    func_list[func_counter].num_hits = 0;
-    func_list[func_counter].num_misses = 0;
-    func_list[func_counter].num_evictions =0;
-    func_counter++;
+    opterr = 0;
+
+    const char *optstring = "s:E:b:t:";
+
+    int ret; 
+
+    while((ret = getopt(argc, argv, optstring)) != -1) {
+        switch(ret) {
+            case 's':
+                sflag = atoi(optarg);
+                break;
+            case 'E':
+                eflag = atoi(optarg);
+                break;
+            case 'b':
+                bflag = atoi(optarg);
+                break;
+            case 't':
+                t = optarg;
+                break;
+        }
+    }
+    
+
+    Cache* cache = initStructs(); 
+    readInInput(cache);
+
+    int numSets = 1 << sflag;
+    for (int i = 0; i < numSets; ++i) {
+        for (int j = 0; j < eflag; ++j) {
+            free(cache->sets[i]->lines[j]); 
+        }
+        free(cache->sets[i]->lines);
+        free(cache->sets[i]); 
+    }
+
+    free(cache->sets);
+    free(cache);
+
+
+
+    printf("%d, %d, %d", hit_count, miss_count, eviction_count);
+    return 0;
 }
